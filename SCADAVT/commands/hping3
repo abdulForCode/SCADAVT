@@ -1,0 +1,4 @@
+hping3 --flood -p 502 192.168.1.20 --count 10 -i 0.1 
+hping3 --flood -p 502 192.168.1.20 --count 10 -i u1000 --data 10000
+hping3 -S -p 502 192.168.1.20 --count 10 -i u1000 --data 10000
+

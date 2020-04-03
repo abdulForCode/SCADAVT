@@ -1,0 +1,781 @@
+node n1 {
+    type router
+    model Slave_ModBus_PLC
+    network-config {
+	hostname PLC for Pumps
+	!
+	interface eth0
+	 ip address 192.168.0.1/24
+	 ipv6 address 2001:0::1/64
+	!
+    }
+    canvas c1
+    iconcoords {120.0 66.0}
+    labelcoords {118.0 42.0}
+    interface-peer {eth0 n4}
+    custom-config {
+	custom-config-id service:slave:slave.py
+	custom-command slave.py
+	config {
+	 
+	import modbus_tk
+	import modbus_tk.modbus_tcp as modbus_tcp
+	import threading
+	import modbus_tk.defines as mdef
+	from ConfigParser import SafeConfigParser
+	import os
+	import time 
+	class Slave():
+	    def __init__(self):
+	        self.server = modbus_tcp.TcpServer(502,'192.168.0.1',1,None) # core emulator
+	        self.slave=self.server.add_slave(1) 
+	        self.regMap={};
+	        self.writeCounter=1;
+	        self.readCounter=1;
+	        self.operationState=1;
+	# To load registers configuration of PLC
+	    def loadRegConf(self):
+	        parser = SafeConfigParser()
+	        found =0;
+	        print "waiting for RegConfig file"
+	        while(found==0):
+	            if os.path.exists('IO_modules/regConfig.ini'):
+	                parser.read('IO_modules/regConfig.ini');
+	                for section in parser.sections():
+	                    tempSection=[];
+	                    tempSection.append(parser.get(section, 'block'));  
+	                    tempSection.append(int(float(parser.get(section, 'position')))); 
+	                    tempSection.append(int(float(parser.get(section, 'length')))); 
+	                    tempSection.append(parser.get(section, 'devicetype')); 
+	                    tempSection.append(parser.getfloat(section, 'value'));  
+	                    self.regMap[section]=tempSection; 
+	                    found=1;
+	            time.sleep(1);
+	    def getData(self,block,position,length):
+	        tempvalue=self.slave.get_values(block, position, length)
+	        return tempvalue[0];    
+	    def readFromInputModul(self):
+	        parser = SafeConfigParser()
+	        if os.path.exists('IO_modules/outputIsReady.txt'):
+	            if os.path.exists('IO_modules/output' + (str(int(self.readCounter))+'.ini').strip(' ')):
+	                parser.read('IO_modules/output' + (str(int(self.readCounter))+'.ini').strip(' '));
+	                for section in parser.sections():
+	                    block=parser.get(section, 'block');  
+	                    position=int(float(parser.get(section, 'position'))); 
+	                    value =float(parser.get(section, 'value')); 
+	                    devicetype =parser.get(section, 'devicetype'); 
+	                    if devicetype=='i':
+	                        self.slave.set_values(block, position, value)
+	                self.readCounter+=1;
+	                self.operationState=2;
+	                os.remove('IO_modules/outputIsReady.txt');                
+	    def writeToOutputModul(self): 
+	        parser = SafeConfigParser()
+	        file=open('IO_modules/input' + str(int(self.writeCounter))+'.ini','w')
+	        parser.read('IO_modules/input'+ (str(int(self.writeCounter))+'.ini').strip(' '));  
+	        for processID, value in self.regMap.iteritems():
+	            if value[3]=='o': 
+	                tempvalue= self.getData(value[0], value[1], value[2]);
+	                parser.add_section(processID)
+	                parser.set(processID,'block',value[0])
+	                parser.set(processID,'position',str(value[1]))
+	                parser.set(processID,'length',str(value[2]))
+	                parser.set(processID,'devicetype',value[3])
+	                parser.set(processID,'Value',str(tempvalue))
+	        parser.write(file);
+	        file.close();  
+	        file=open('IO_modules/inputIsReady.txt','w');
+	        file.write("ready");
+	        file.close()  
+	        self.writeCounter+=1;
+	        self.operationState=1;                
+	    def PLCConfiguration(self):           
+	        logger = modbus_tk.utils.create_logger(name="console", record_format="%(message)s")
+	        #add blocks of  registers
+	        self.slave.add_block("h", mdef.HOLDING_REGISTERS, 0, 100)    #address 0, length 100
+	        self.slave.add_block("c", mdef.COILS, 0, 100)                     #address 0, length 100
+	        self.slave.add_block("d", mdef.DISCRETE_INPUTS, 0, 100)       #address 0, length 100
+	        self.slave.add_block("a", mdef.ANALOG_INPUTS, 0, 100)         #address 0, length 100
+	        ##self.slave.set_values("c", 0, [1,1,1])
+	        ##     HOLDING_DATA = [64000,3]
+	        ##    COILS_DATA = [0,0,1,1]
+	        ##    DISCRETE_DATA = [1,1,1,0,0,1]
+	        ##    ANALOG_DATA = [4444,455]
+	        ##    set the values of registers at address 0
+	        ##    self.slave.set_values("h", 0, HOLDING_DATA)   
+	        ##    self.slave.set_values("c", 10, COILS_DATA)
+	        ##    self.slave.set_values("a", 30, ANALOG_DATA)
+	    def start(self,pollRate=0.001):
+	        self.loadRegConf();
+	        self.PLCConfiguration();
+	        self.server.start()
+	        print "Slave is running..."
+	        counter=0;
+	        while(counter<500000):
+	            print self.slave.get_values('d', 0, 10)
+	            print self.slave.get_values('a', 0, 10)
+	            if self.operationState==1:    
+	                #To read data from sensors and actutors"
+	                self.readFromInputModul();
+	                self.procedureControl(); # This procedure uses  input information to make decisions
+	            elif self.operationState==2:
+	                #To write data onto sensors and actutors"
+	                self.writeToOutputModul();    
+	            time.sleep(pollRate)
+	            counter+=1;
+	            # To remove old measurement data
+	            if os.path.exists('IO_modules/output' + (str(int(self.readCounter-4))+'.ini').strip(' ')):
+	                os.remove('IO_modules/output' + (str(int(self.readCounter-4))+'.ini').strip(' '));  
+	            if os.path.exists('IO_modules/input' + (str(int(self.writeCounter-4))+'.ini').strip(' ')):
+	                os.remove('IO_modules/input' + (str(int(self.writeCounter-4))+'.ini').strip(' '));  
+	#%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+	
+	    def procedureControl(self):
+		p1=self.getData('c',0,1);
+		p2=self.getData('c',1,1);
+		p3=self.getData('c',2,1);
+	        self.slave.set_values("d", 3,[p1,p2,p3]);
+	        # control code will be written here    
+	if __name__ == '__main__':
+	    s= Slave();
+	    s.start(0.5)
+	}
+    }
+    custom-config {
+	custom-config-id service:slave
+	custom-command slave
+	config {
+	
+	('slave.py', )
+	2
+	('python slave.py', )
+	
+	
+	
+	}
+    }
+    custom-config {
+	custom-config-id service:syn:syn.py
+	custom-command syn.py
+	config {
+	 
+	import SocketServer
+	import struct
+	import io
+	from ConfigParser import SafeConfigParser
+	import os.path
+	import sys
+	class MyTCPHandler(SocketServer.BaseRequestHandler):
+	    def handle(self):
+	        # self.request is the TCP socket connected to the client
+	        parser = SafeConfigParser()
+	        RWCounter=1;
+	        processNum=0;
+	        connection=0;
+	#=======================
+	        while(RWCounter<>0):
+	            self.data = self.request.recv(48)
+	            [action,paraID,block,position,length,RWCounter,data,devicetype]= struct.unpack("!B20s10sffffs",self.data);
+	            [paraID,block]=[paraID.strip('\x00'),block.strip('\x00')];
+	            if action==1:
+	                print "writing into PLC " + str(RWCounter)
+	            elif action==2:
+	                print "reading from PLC " + str(RWCounter)
+	                # when actiom =1 the data stored into plc input modul
+	            if action==1: 
+	                # when action =1 input module of PLC  is fed with measurement data 
+	                if connection==0:
+	                    file=open('IO_modules/output' + str(int(RWCounter))+'.ini','w')
+	                    parser.read('IO_modules/output' + str(int(RWCounter))+'.ini');
+	                    connection=1;
+	                if RWCounter==0:   
+	                    parser.write(file);           
+	                    file.close(); 
+	                    file=open('IO_modules/outputIsReady.txt','w')
+	                    file.write("ready");
+	                else:
+	                    parser.add_section(paraID)
+	                    parser.set(paraID,'block',block)
+	                    parser.set(paraID,'position',str(position))
+	                    parser.set(paraID,'length',str(length))
+	                    parser.set(paraID,'devicetype',devicetype)
+	                    parser.set(paraID,'Value',str(data)) 
+	            elif action==2: 
+	                # when action =2 measurement data of  output module of PLC  is read
+	                if RWCounter ==0:
+	                    self.request.sendall(struct.pack("!B20s10sffffs",action,'','',0,0,0,0,''));  
+	                    break;
+	                if connection==0:
+	                    if os.path.exists('IO_modules/inputIsReady.txt'):
+	                        if os.path.exists('IO_modules/input' + (str(int(RWCounter))+'.ini').strip(' ')):
+	                            parser.read('IO_modules/input' + (str(int(RWCounter))+'.ini').strip(' ')); 
+	                            connection=1;
+	                            os.remove('IO_modules/inputIsReady.txt');  
+	                        else:
+	                            self.request.sendall(struct.pack("!B20s10sffffs",action,'','',0,0,0,0,''));      
+	                    else:
+	                        self.request.sendall(struct.pack("!B20s10sffffs",action,'','',0,0,0,0,''));     
+	                if  connection==1: 
+	                    if parser.has_section(paraID):
+	                        data=parser.getfloat(paraID, 'value');
+	                        self.request.sendall(struct.pack("!B20s10sffffs",action,paraID,block,position,length,RWCounter,data,devicetype));    
+	            elif action==3: 
+	                # when action =3  the registers configuration is read 
+	                if connection==0:
+	                    if os.path.exists('IO_modules/regConfig.ini'):
+	                        os.remove('IO_modules/regConfig.ini');    
+	                    #------------
+	                    file=open('IO_modules/regConfig.ini','w')
+	                    parser.read('IO_modules/regConfig.ini');
+	                    connection=1;
+	                #----------------------------------------
+	                if RWCounter==0:   
+	                    parser.write(file);           
+	                    file.close(); 
+	                else:
+	                    parser.add_section(paraID)
+	                    parser.set(paraID,'block',block)
+	                    parser.set(paraID,'position',str(position))
+	                    parser.set(paraID,'length',str(length))
+	                    parser.set(paraID,'devicetype',devicetype)
+	                    parser.set(paraID,'Value',str(data))             
+	if __name__ == "__main__":
+	    if os.path.exists('IO_modules'):
+	        os.system('rm -rf IO_modules')
+	        os.mkdir("IO_modules") 
+	    else:
+	        os.mkdir("IO_modules") 
+	    #HOST, PORT = "192.168.16.132", 9162
+	    HOST, PORT = '172.16.0.1', 9161
+	    #HOST, PORT = '192.168.32.138', 9161
+	    server = SocketServer.TCPServer((HOST, PORT), MyTCPHandler)
+	    server.serve_forever()
+	}
+    }
+    custom-config {
+	custom-config-id service:syn
+	custom-command syn
+	config {
+	
+	('syn.py', )
+	1
+	('python syn.py', )
+	
+	
+	
+	}
+    }
+    services {zebra OSPFv2 OSPFv3 vtysh IPForward slave syn}
+    custom-image /usr/lib/core/icons/normal/plc1.png
+}
+
+node n2 {
+    type router
+    model PC
+    network-config {
+	hostname Master
+	!
+	interface eth0
+	 ip address 192.168.0.21/24
+	 ipv6 address 2001:0::21/64
+	!
+    }
+    canvas c1
+    iconcoords {218.0 278.0}
+    labelcoords {219.0 320.0}
+    interface-peer {eth0 n4}
+    custom-config {
+	custom-config-id service:Master:master.py
+	custom-command master.py
+	config {
+	 
+	import modbus_tk
+	import modbus_tk.defines as cst
+	import modbus_tk.modbus_tcp as modbus_tcp
+	import time
+	class Master():
+	        def __init__(self,pullRate=0.001):
+	                self.pullRate=pullRate;    
+	        def procedureControl(self):
+	        #Connect to the slave and execute commands
+	                try:
+	                        masterPump = modbus_tcp.TcpMaster('192.168.0.1',502)
+				HMIServer = modbus_tcp.TcpMaster('172.16.0.254',506)
+				masterTank = modbus_tcp.TcpMaster('192.168.0.20',502)
+				pump= masterPump.execute(1, cst.READ_DISCRETE_INPUTS, 0, 3)
+				tank1= masterTank.execute(1, cst.READ_INPUT_REGISTERS, 0, 1)
+				print [pump,tank1];
+				waterLevel=tank1[0];
+		  		if waterLevel>27:
+					masterPump.execute(1, cst.WRITE_MULTIPLE_COILS, 0,output_value= [0,0,0])
+				elif waterLevel<25 and pump[0]==0:
+					masterPump.execute(1, cst.WRITE_MULTIPLE_COILS, 0,output_value= [1,0,0])
+				elif waterLevel<18 and pump[1]==0:
+					masterPump.execute(1, cst.WRITE_MULTIPLE_COILS, 0,output_value= [1,1,0])
+				elif waterLevel<12 and pump[2]==0:
+					masterPump.execute(1, cst.WRITE_MULTIPLE_COILS, 0,output_value= [1,1,1])
+	
+			#send to HMI Server
+			#------------------------
+				pump= masterPump.execute(1, cst.READ_DISCRETE_INPUTS, 0, 3)
+				tank1= masterTank.execute(1, cst.READ_INPUT_REGISTERS, 0, 1)
+				HMIServer.execute(1, cst.WRITE_MULTIPLE_COILS, 0,output_value= pump)
+				HMIServer.execute(1, cst.WRITE_SINGLE_REGISTER, 0,output_value= tank1[0])
+			#------------------------
+	                except modbus_tk.modbus.ModbusError, e:
+	                        print "Modbus error ", e.get_exception_code()
+	                except Exception, e2:
+	                        print "Error ", str(e2)        
+	        def start(self):
+	                conter=0;
+	                while(conter<1000000):
+	                        self.procedureControl();
+	                        conter+=1;
+	                        time.sleep(self.pullRate);                
+	if __name__ == "__main__":
+	    s= Master(0.5);
+	    s.start();   
+	
+	
+	#-----------------------------------------------------------------------------------------------------------------
+	##        print master.execute(1, cst.READ_HOLDING_REGISTERS, 0, 10)
+	##        print master.execute(1, cst.READ_COILS , 10, 10)
+	##        print master.execute(1, cst.READ_DISCRE+ _INPUTS, 20, 10)
+	##        print master.execute(1, cst.READ_INPUT_REGISTERS, 30, 10)
+	#-----------------------------------------------------------------------------------------------------------------
+	##        master.execute(1, cst.WRITE_MULTIPLE_REGISTERS, 0, output_value=range(300,310))
+	##        master.execute(1, cst.WRITE_SINGLE_REGISTER, 0, output_value=[3434])
+	##        master.execute(1, cst.WRITE_MULTIPLE_COILS, 10,output_value= [1,1,1,1,1])
+	##        master.execute(1, cst.WRITE_SINGLE_COIL, 10,output_value= [55])
+	}
+    }
+    custom-config {
+	custom-config-id service:Master
+	custom-command Master
+	config {
+	
+	('master.py', )
+	50
+	('master.py', )
+	
+	
+	
+	}
+    }
+    services {DefaultRoute Master}
+    custom-image /usr/lib/core/icons/normal/plc2.png
+}
+
+node n3 {
+    type router
+    model PC
+    network-config {
+	hostname PLC_T1_water_level
+	!
+	interface eth0
+	 ip address 192.168.0.20/24
+	 ipv6 address 2001:0::20/64
+	!
+    }
+    canvas c1
+    iconcoords {344.0 64.0}
+    labelcoords {342.0 35.0}
+    interface-peer {eth0 n4}
+    custom-config {
+	custom-config-id service:slave:slave.py
+	custom-command slave.py
+	config {
+	 
+	import modbus_tk
+	import modbus_tk.modbus_tcp as modbus_tcp
+	import threading
+	import modbus_tk.defines as mdef
+	from ConfigParser import SafeConfigParser
+	import os
+	import time 
+	class Slave():
+	    def __init__(self):
+	        self.server = modbus_tcp.TcpServer(502,'192.168.0.20',1,None) # core emulator
+	        self.slave=self.server.add_slave(1) 
+	        self.regMap={};
+	        self.writeCounter=1;
+	        self.readCounter=1;
+	        self.operationState=1;
+	# To load registers configuration of PLC
+	    def loadRegConf(self):
+	        parser = SafeConfigParser()
+	        found =0;
+	        print "waiting for RegConfig file"
+	        while(found==0):
+	            if os.path.exists('IO_modules/regConfig.ini'):
+	                parser.read('IO_modules/regConfig.ini');
+	                for section in parser.sections():
+	                    tempSection=[];
+	                    tempSection.append(parser.get(section, 'block'));  
+	                    tempSection.append(int(float(parser.get(section, 'position')))); 
+	                    tempSection.append(int(float(parser.get(section, 'length')))); 
+	                    tempSection.append(parser.get(section, 'devicetype')); 
+	                    tempSection.append(parser.getfloat(section, 'value'));  
+	                    self.regMap[section]=tempSection; 
+	                    found=1;
+	            time.sleep(1);
+	    def getData(self,block,position,length):
+	        tempvalue=self.slave.get_values(block, position, length)
+	        return tempvalue[0];    
+	    def readFromInputModul(self):
+	        parser = SafeConfigParser()
+	        if os.path.exists('IO_modules/outputIsReady.txt'):
+	            if os.path.exists('IO_modules/output' + (str(int(self.readCounter))+'.ini').strip(' ')):
+	                parser.read('IO_modules/output' + (str(int(self.readCounter))+'.ini').strip(' '));
+	                for section in parser.sections():
+	                    block=parser.get(section, 'block');  
+	                    position=int(float(parser.get(section, 'position'))); 
+	                    value =float(parser.get(section, 'value')); 
+	                    devicetype =parser.get(section, 'devicetype'); 
+	                    if devicetype=='i':
+	                        self.slave.set_values(block, position, value)
+	                self.readCounter+=1;
+	                self.operationState=2;
+	                os.remove('IO_modules/outputIsReady.txt');                
+	    def writeToOutputModul(self): 
+	        parser = SafeConfigParser()
+	        file=open('IO_modules/input' + str(int(self.writeCounter))+'.ini','w')
+	        parser.read('IO_modules/input'+ (str(int(self.writeCounter))+'.ini').strip(' '));  
+	        for processID, value in self.regMap.iteritems():
+	            if value[3]=='o': 
+	                tempvalue= self.getData(value[0], value[1], value[2]);
+	                parser.add_section(processID)
+	                parser.set(processID,'block',value[0])
+	                parser.set(processID,'position',str(value[1]))
+	                parser.set(processID,'length',str(value[2]))
+	                parser.set(processID,'devicetype',value[3])
+	                parser.set(processID,'Value',str(tempvalue))
+	        parser.write(file);
+	        file.close();  
+	        file=open('IO_modules/inputIsReady.txt','w');
+	        file.write("ready");
+	        file.close()  
+	        self.writeCounter+=1;
+	        self.operationState=1;                
+	    def PLCConfiguration(self):           
+	        logger = modbus_tk.utils.create_logger(name="console", record_format="%(message)s")
+	        #add blocks of  registers
+	        self.slave.add_block("h", mdef.HOLDING_REGISTERS, 0, 100)    #address 0, length 100
+	        self.slave.add_block("c", mdef.COILS, 0, 100)                     #address 0, length 100
+	        self.slave.add_block("d", mdef.DISCRETE_INPUTS, 0, 100)       #address 0, length 100
+	        self.slave.add_block("a", mdef.ANALOG_INPUTS, 0, 100)         #address 0, length 100
+	        ##     HOLDING_DATA = [64000,3]
+	        ##    COILS_DATA = [0,0,1,1]
+	        ##    DISCRETE_DATA = [1,1,1,0,0,1]
+	        ##    ANALOG_DATA = [4444,455]
+	        ##    set the values of registers at address 0
+	        ##    self.slave.set_values("h", 0, HOLDING_DATA)   
+	        ##    self.slave.set_values("c", 10, COILS_DATA)
+	        ##    self.slave.set_values("a", 30, ANALOG_DATA)
+	    def start(self,pollRate=0.001):
+	        self.loadRegConf();
+	        self.PLCConfiguration();
+	        self.server.start()
+	        print "Slave is running..."
+	        counter=0;
+	        while(counter<500000):
+	            print self.slave.get_values('d', 0, 10)
+	            print self.slave.get_values('a', 0, 10)
+	            if self.operationState==1:    
+	                #To read data from sensors and actutors"
+	                self.readFromInputModul();
+	                self.procedureControl(); # This procedure uses  input information to make decisions
+	            elif self.operationState==2:
+	                #To write data onto sensors and actutors"
+	                self.writeToOutputModul();    
+	            time.sleep(pollRate)
+	            counter+=1;
+	            # To remove old measurement data
+	            if os.path.exists('IO_modules/output' + (str(int(self.readCounter-4))+'.ini').strip(' ')):
+	                os.remove('IO_modules/output' + (str(int(self.readCounter-4))+'.ini').strip(' '));  
+	            if os.path.exists('IO_modules/input' + (str(int(self.writeCounter-4))+'.ini').strip(' ')):
+	                os.remove('IO_modules/input' + (str(int(self.writeCounter-4))+'.ini').strip(' '));  
+	#%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+	
+	    def procedureControl(self):
+	        self.slave.set_values("d", 3, self.getData('c',0,3));
+	        # control code will be written here    
+	if __name__ == '__main__':
+	    s= Slave();
+	    s.start(0.5)
+	}
+    }
+    custom-config {
+	custom-config-id service:slave
+	custom-command slave
+	config {
+	
+	('slave.py', )
+	2
+	('python slave.py', )
+	
+	
+	
+	}
+    }
+    custom-config {
+	custom-config-id service:syn:syn.py
+	custom-command syn.py
+	config {
+	 
+	import SocketServer
+	import struct
+	import io
+	from ConfigParser import SafeConfigParser
+	import os.path
+	import sys
+	class MyTCPHandler(SocketServer.BaseRequestHandler):
+	    def handle(self):
+	        # self.request is the TCP socket connected to the client
+	        parser = SafeConfigParser()
+	        RWCounter=1;
+	        processNum=0;
+	        connection=0;
+	#=======================
+	        while(RWCounter<>0):
+	            self.data = self.request.recv(48)
+	            [action,paraID,block,position,length,RWCounter,data,devicetype]= struct.unpack("!B20s10sffffs",self.data);
+	            [paraID,block]=[paraID.strip('\x00'),block.strip('\x00')];
+	            if action==1:
+	                print "writing into PLC " + str(RWCounter)
+	            elif action==2:
+	                print "reading from PLC " + str(RWCounter)
+	                # when actiom =1 the data stored into plc input modul
+	            if action==1: 
+	                # when action =1 input module of PLC  is fed with measurement data 
+	                if connection==0:
+	                    file=open('IO_modules/output' + str(int(RWCounter))+'.ini','w')
+	                    parser.read('IO_modules/output' + str(int(RWCounter))+'.ini');
+	                    connection=1;
+	                if RWCounter==0:   
+	                    parser.write(file);           
+	                    file.close(); 
+	                    file=open('IO_modules/outputIsReady.txt','w')
+	                    file.write("ready");
+	                else:
+	                    parser.add_section(paraID)
+	                    parser.set(paraID,'block',block)
+	                    parser.set(paraID,'position',str(position))
+	                    parser.set(paraID,'length',str(length))
+	                    parser.set(paraID,'devicetype',devicetype)
+	                    parser.set(paraID,'Value',str(data)) 
+	            elif action==2: 
+	                # when action =2 measurement data of  output module of PLC  is read
+	                if RWCounter ==0:
+	                    self.request.sendall(struct.pack("!B20s10sffffs",action,'','',0,0,0,0,''));  
+	                    break;
+	                if connection==0:
+	                    if os.path.exists('IO_modules/inputIsReady.txt'):
+	                        if os.path.exists('IO_modules/input' + (str(int(RWCounter))+'.ini').strip(' ')):
+	                            parser.read('IO_modules/input' + (str(int(RWCounter))+'.ini').strip(' ')); 
+	                            connection=1;
+	                            os.remove('IO_modules/inputIsReady.txt');  
+	                        else:
+	                            self.request.sendall(struct.pack("!B20s10sffffs",action,'','',0,0,0,0,''));      
+	                    else:
+	                        self.request.sendall(struct.pack("!B20s10sffffs",action,'','',0,0,0,0,''));     
+	                if  connection==1: 
+	                    if parser.has_section(paraID):
+	                        data=parser.getfloat(paraID, 'value');
+	                        self.request.sendall(struct.pack("!B20s10sffffs",action,paraID,block,position,length,RWCounter,data,devicetype));    
+	            elif action==3: 
+	                # when action =3  the registers configuration is read 
+	                if connection==0:
+	                    if os.path.exists('IO_modules/regConfig.ini'):
+	                        os.remove('IO_modules/regConfig.ini');    
+	                    #------------
+	                    file=open('IO_modules/regConfig.ini','w')
+	                    parser.read('IO_modules/regConfig.ini');
+	                    connection=1;
+	                #----------------------------------------
+	                if RWCounter==0:   
+	                    parser.write(file);           
+	                    file.close(); 
+	                else:
+	                    parser.add_section(paraID)
+	                    parser.set(paraID,'block',block)
+	                    parser.set(paraID,'position',str(position))
+	                    parser.set(paraID,'length',str(length))
+	                    parser.set(paraID,'devicetype',devicetype)
+	                    parser.set(paraID,'Value',str(data))             
+	if __name__ == "__main__":
+	    if os.path.exists('IO_modules'):
+	        os.system('rm -rf IO_modules')
+	        os.mkdir("IO_modules") 
+	    else:
+	        os.mkdir("IO_modules") 
+	    #HOST, PORT = "192.168.16.132", 9162
+	    HOST, PORT = '172.16.0.3', 9163
+	    #HOST, PORT = '192.168.32.138', 9161
+	    server = SocketServer.TCPServer((HOST, PORT), MyTCPHandler)
+	    server.serve_forever()
+	}
+    }
+    custom-config {
+	custom-config-id service:syn
+	custom-command syn
+	config {
+	
+	('syn.py', )
+	1
+	('python syn.py', )
+	
+	
+	
+	}
+    }
+    services {DefaultRoute slave syn}
+    custom-image /usr/lib/core/icons/normal/plc1.png
+}
+
+node n4 {
+    type lanswitch
+    network-config {
+	hostname n4
+	!
+    }
+    canvas c1
+    iconcoords {522.0 278.0}
+    labelcoords {522.0 302.0}
+    interface-peer {e0 n1}
+    interface-peer {e1 n3}
+    interface-peer {e2 n2}
+    interface-peer {e3 n5}
+    interface-peer {e4 n6}
+    interface-peer {e5 n7}
+    interface-peer {e6 n8}
+}
+
+node n5 {
+    type router
+    model Slave_ModBus_PLC
+    network-config {
+	hostname n5_pump_3_4
+	!
+	interface eth0
+	 ip address 192.168.0.2/24
+	 ipv6 address 2001:0::2/64
+	!
+    }
+    canvas c1
+    iconcoords {493.0 54.0}
+    labelcoords {481.0 25.0}
+    interface-peer {eth0 n4}
+    custom-image /usr/lib/core/icons/normal/plc1.png
+}
+
+node n6 {
+    type router
+    model Slave_ModBus_PLC
+    network-config {
+	hostname n6_T3
+	!
+	interface eth0
+	 ip address 192.168.0.3/24
+	 ipv6 address 2001:0::3/64
+	!
+    }
+    canvas c1
+    iconcoords {614.0 57.0}
+    labelcoords {604.0 26.0}
+    interface-peer {eth0 n4}
+    custom-image /usr/lib/core/icons/normal/plc1.png
+}
+
+node n7 {
+    type router
+    model Slave_ModBus_PLC
+    network-config {
+	hostname n7_V1
+	!
+	interface eth0
+	 ip address 192.168.0.4/24
+	 ipv6 address 2001:0::4/64
+	!
+    }
+    canvas c1
+    iconcoords {730.0 71.0}
+    labelcoords {728.0 38.0}
+    interface-peer {eth0 n4}
+    custom-image /usr/lib/core/icons/normal/plc1.png
+}
+
+node n8 {
+    type router
+    model Slave_ModBus_PLC
+    network-config {
+	hostname n8_T2
+	!
+	interface eth0
+	 ip address 192.168.0.5/24
+	 ipv6 address 2001:0::5/64
+	!
+    }
+    canvas c1
+    iconcoords {854.0 80.0}
+    labelcoords {851.0 50.0}
+    interface-peer {eth0 n4}
+    custom-image /usr/lib/core/icons/normal/plc1.png
+}
+
+link l1 {
+    nodes {n1 n4}
+    bandwidth 0
+}
+
+link l2 {
+    nodes {n3 n4}
+    bandwidth 0
+}
+
+link l3 {
+    delay 160
+    width 2
+    nodes {n2 n4}
+    bandwidth 10000000
+}
+
+link l4 {
+    nodes {n4 n5}
+    bandwidth 0
+}
+
+link l5 {
+    nodes {n4 n6}
+    bandwidth 0
+}
+
+link l6 {
+    nodes {n4 n7}
+    bandwidth 0
+}
+
+link l7 {
+    nodes {n4 n8}
+    bandwidth 0
+}
+
+canvas c1 {
+    name {Canvas1}
+}
+
+option global {
+    interface_names no
+    ip_addresses yes
+    ipv6_addresses no
+    node_labels yes
+    link_labels no
+    ipsec_configs yes
+    exec_errors yes
+    show_api no
+    background_images no
+    annotations yes
+    grid yes
+    traffic_start 0
+}
+
